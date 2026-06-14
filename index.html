@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weather Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0d1117;
+      -webkit-font-smoothing: antialiased;
+    }
+    input, button { font-family: inherit; }
+    input:focus  { outline: none; }
+    button:focus-visible { outline: 2px solid #4f6ef7; outline-offset: 2px; }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(24px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes idlePulse {
+      0%, 100% { opacity: 0.28; }
+      50%       { opacity: 0.45; }
+    }
+
+    .spinner {
+      width: 38px; height: 38px;
+      border: 2.5px solid rgba(79,110,247,0.18);
+      border-top-color: #4f6ef7;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .weather-card  { animation: fadeInUp 0.45s cubic-bezier(0.16,1,0.3,1) both; }
+    .idle-globe    { animation: idlePulse 3s ease-in-out infinite; }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+    @media (max-width: 580px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    ::-webkit-scrollbar        { width: 5px; }
+    ::-webkit-scrollbar-track  { background: transparent; }
+    ::-webkit-scrollbar-thumb  { background: rgba(255,255,255,0.1); border-radius: 4px; }
+
+    input::placeholder { color: rgba(110,118,129,0.75); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // Replace with your free API key from openweathermap.org
+    const API_KEY  = 'abd57fb9389d369afb6ae5c2170de3e2';
+    const BASE_URL = 'https://api.openweathermap.org/data/2.5/weather';
+
+    /* ─────────────────── Utils ─────────────────── */
+
+    const getBg = (id) => {
+      if (!id) return { a: '#060818', b: '#0d1117', c: '#111827', glow: '#4f6ef7' };
+      if (id === 800)               return { a: '#02091c', b: '#061840', c: '#0c2d6e', glow: '#3b82f6' }; // Clear sky
+      if (id >= 801 && id <= 804)   return { a: '#0e1118', b: '#1a2030', c: '#252f3e', glow: '#6b7280' }; // Clouds
+      if (id >= 200 && id < 300)    return { a: '#08041a', b: '#15082e', c: '#280e5a', glow: '#8b5cf6' }; // Thunderstorm
+      if (id >= 300 && id < 600)    return { a: '#031018', b: '#052a3c', c: '#0a3e58', glow: '#06b6d4' }; // Rain / Drizzle
+      if (id >= 600 && id < 700)    return { a: '#091428', b: '#142245', c: '#1e3260', glow: '#93c5fd' }; // Snow
+      if (id >= 700 && id < 800)    return { a: '#120d08', b: '#2a1e10', c: '#3e2e18', glow: '#d97706' }; // Fog / Haze
+      return { a: '#060818', b: '#0d1117', c: '#111827', glow: '#4f6ef7' };
+    };
+
+    const getLocalTime = (tzOffset) => {
+      const utcMs = Date.now() + new Date().getTimezoneOffset() * 60000;
+      return new Date(utcMs + tzOffset * 1000).toLocaleTimeString('en-US', {
+        hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+    };
+
+    const toF       = (c) => Math.round(c * 9 / 5 + 32);
+    const fmtTemp   = (c, unit) => unit === 'C' ? Math.round(c) : toF(c);
+    const capitalize = (s) => s.split(' ').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
+
+    const STORAGE_KEY  = 'weather_recent_v1';
+    const loadRecent   = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } };
+    const pushRecent   = (city, list) => {
+      const next = [city, ...list.filter(c => c.toLowerCase() !== city.toLowerCase())].slice(0, 5);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    };
+
+    /* ─────────────────── Spinner ─────────────────── */
+    const Spinner = () => (
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:14, padding:'64px 0' }}>
+        <div className="spinner" />
+        <p style={{ color:'#6e7681', fontSize:'0.88rem', fontWeight:500 }}>Fetching weather data…</p>
+      </div>
+    );
+
+    /* ─────────────────── Error ─────────────────── */
+    const ErrorState = ({ msg, onDismiss }) => (
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:16, padding:'56px 24px', textAlign:'center' }}>
+        <div style={{
+          width:54, height:54, borderRadius:'50%',
+          background:'rgba(248,113,113,0.1)', border:'1px solid rgba(248,113,113,0.28)',
+          display:'flex', alignItems:'center', justifyContent:'center', fontSize:'1.5rem',
+        }}>⚠️</div>
+        <p style={{ color:'#f87171', fontSize:'0.95rem', fontWeight:600, maxWidth:340, lineHeight:1.6 }}>{msg}</p>
+        <button
+          onClick={onDismiss}
+          style={{ background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.12)', color:'#8b949e', borderRadius:8, padding:'8px 22px', cursor:'pointer', fontSize:'0.84rem', fontWeight:500 }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor='rgba(79,110,247,0.5)'; e.currentTarget.style.color='#818cf8'; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor='rgba(255,255,255,0.12)'; e.currentTarget.style.color='#8b949e'; }}
+        >
+          Try again
+        </button>
+      </div>
+    );
+
+    /* ─────────────────── Stat Card ─────────────────── */
+    const StatCard = ({ icon, label, value, unit }) => {
+      const [hov, setHov] = useState(false);
+      return (
+        <div
+          onMouseEnter={() => setHov(true)}
+          onMouseLeave={() => setHov(false)}
+          style={{
+            background: hov ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.04)',
+            border: `1px solid ${hov ? 'rgba(79,110,247,0.38)' : 'rgba(255,255,255,0.08)'}`,
+            borderRadius: 14, padding: 'clamp(14px,3vw,20px) clamp(14px,2vw,22px)',
+            display: 'flex', flexDirection: 'column', gap: 10,
+            transition: 'background 180ms, border-color 180ms',
+            cursor: 'default',
+          }}
+        >
+          <div style={{ display:'flex', alignItems:'center', gap:7 }}>
+            <span style={{ fontSize:'0.9rem' }}>{icon}</span>
+            <span style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'0.1em', textTransform:'uppercase', color:'#6e7681' }}>
+              {label}
+            </span>
+          </div>
+          <div style={{ display:'flex', alignItems:'baseline', gap:4 }}>
+            <span style={{ fontSize:'clamp(1.5rem,4vw,2rem)', fontWeight:800, color:'#f0f6fc', lineHeight:1, letterSpacing:'-0.02em' }}>
+              {value}
+            </span>
+            {unit && <span style={{ fontSize:'0.84rem', fontWeight:500, color:'#8b949e' }}>{unit}</span>}
+          </div>
+        </div>
+      );
+    };
+
+    /* ─────────────────── Weather Card ─────────────────── */
+    const WeatherCard = ({ data, unit }) => {
+      const [localTime, setLocalTime] = useState(() => getLocalTime(data.timezone));
+      const bg      = getBg(data.weather[0].id);
+      const desc    = capitalize(data.weather[0].description);
+      const windSpd = unit === 'C'
+        ? data.wind.speed.toFixed(1)
+        : (data.wind.speed * 2.237).toFixed(1);
+      const windUnit = unit === 'C' ? 'm/s' : 'mph';
+      const vis      = data.visibility != null ? (data.visibility / 1000).toFixed(1) : '—';
+
+      useEffect(() => {
+        setLocalTime(getLocalTime(data.timezone));
+        const tid = setInterval(() => setLocalTime(getLocalTime(data.timezone)), 60000);
+        return () => clearInterval(tid);
+      }, [data.timezone]);
+
+      return (
+        <div className="weather-card" style={{ width:'100%' }}>
+
+          {/* ── Hero ── */}
+          <div style={{
+            background: `linear-gradient(145deg, ${bg.a} 0%, ${bg.b} 48%, ${bg.c} 100%)`,
+            borderRadius: 20, border: '1px solid rgba(255,255,255,0.07)',
+            padding: 'clamp(24px,5vw,48px)',
+            position: 'relative', overflow: 'hidden', marginBottom: 12,
+          }}>
+            {/* Radial glow */}
+            <div style={{
+              position:'absolute', top:'-30%', right:'-8%',
+              width:'52%', aspectRatio:'1', borderRadius:'50%',
+              background: `radial-gradient(circle, ${bg.glow}1a 0%, transparent 70%)`,
+              pointerEvents: 'none',
+            }} />
+            {/* Second subtle glow bottom-left */}
+            <div style={{
+              position:'absolute', bottom:'-20%', left:'-5%',
+              width:'40%', aspectRatio:'1', borderRadius:'50%',
+              background: `radial-gradient(circle, ${bg.glow}0d 0%, transparent 70%)`,
+              pointerEvents: 'none',
+            }} />
+
+            {/* Top row: location | temp */}
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', flexWrap:'wrap', gap:20 }}>
+
+              {/* Location */}
+              <div style={{ flex:'1 1 auto' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:8 }}>
+                  <svg width="11" height="14" viewBox="0 0 12 16" fill="rgba(255,255,255,0.45)">
+                    <path d="M6 0C2.686 0 0 2.686 0 6c0 4.418 6 10 6 10s6-5.582 6-10c0-3.314-2.686-6-6-6zm0 8.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5z"/>
+                  </svg>
+                  <span style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'0.14em', textTransform:'uppercase', color:'rgba(255,255,255,0.45)' }}>
+                    {data.sys.country}
+                  </span>
+                </div>
+                <h1 style={{ fontSize:'clamp(1.8rem,5vw,3rem)', fontWeight:800, color:'#fff', lineHeight:1, letterSpacing:'-0.03em', marginBottom:8 }}>
+                  {data.name}
+                </h1>
+                <p style={{ fontSize:'0.8rem', color:'rgba(255,255,255,0.38)', fontWeight:400, letterSpacing:'0.02em' }}>
+                  Local time · {localTime}
+                </p>
+              </div>
+
+              {/* Temperature */}
+              <div style={{ display:'flex', alignItems:'flex-start', gap:2, flexShrink:0 }}>
+                <img
+                  src={`https://openweathermap.org/img/wn/${data.weather[0].icon}@2x.png`}
+                  alt={desc}
+                  width="72" height="72"
+                  style={{ filter:'drop-shadow(0 0 16px rgba(255,255,255,0.2))', marginTop:-4, marginRight:4 }}
+                />
+                <span style={{ fontSize:'clamp(4rem,11vw,6.5rem)', fontWeight:800, color:'#fff', lineHeight:1, letterSpacing:'-0.045em' }}>
+                  {fmtTemp(data.main.temp, unit)}
+                </span>
+                <span style={{ fontSize:'1.6rem', fontWeight:600, color:'rgba(255,255,255,0.4)', marginTop:10, marginLeft:1 }}>
+                  °{unit}
+                </span>
+              </div>
+            </div>
+
+            {/* Bottom row: badge | hi/lo */}
+            <div style={{ marginTop:24, display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap:10 }}>
+              <span style={{
+                display:'inline-flex', alignItems:'center',
+                background:'rgba(255,255,255,0.1)', border:'1px solid rgba(255,255,255,0.18)',
+                borderRadius:99, padding:'5px 16px',
+                fontSize:'0.82rem', fontWeight:600, color:'rgba(255,255,255,0.9)',
+                letterSpacing:'0.01em', backdropFilter:'blur(10px)',
+              }}>{desc}</span>
+              <span style={{ fontSize:'0.78rem', color:'rgba(255,255,255,0.32)', fontWeight:400, letterSpacing:'0.04em' }}>
+                H: {fmtTemp(data.main.temp_max, unit)}° &nbsp;·&nbsp; L: {fmtTemp(data.main.temp_min, unit)}°
+              </span>
+            </div>
+          </div>
+
+          {/* ── Stat cards ── */}
+          <div className="stat-grid">
+            <StatCard icon="💧" label="Humidity"   value={data.main.humidity}                           unit="%" />
+            <StatCard icon="💨" label="Wind"       value={windSpd}                                      unit={windUnit} />
+            <StatCard icon="🌡️" label="Feels Like" value={`${fmtTemp(data.main.feels_like, unit)}°`}   unit={unit} />
+            <StatCard icon="👁️" label="Visibility" value={vis}                                          unit="km" />
+          </div>
+        </div>
+      );
+    };
+
+    /* ─────────────────── App ─────────────────── */
+    const App = () => {
+      const [query,   setQuery]   = useState('');
+      const [status,  setStatus]  = useState('idle');
+      const [data,    setData]    = useState(null);
+      const [error,   setError]   = useState('');
+      const [unit,    setUnit]    = useState('C');
+      const [recent,  setRecent]  = useState(loadRecent);
+      const [focused, setFocused] = useState(false);
+      const inputRef = useRef(null);
+
+      const fetchWeather = useCallback(async (city) => {
+        if (!city.trim()) return;
+        setStatus('loading');
+        setError('');
+        try {
+          const res  = await fetch(`${BASE_URL}?q=${encodeURIComponent(city.trim())}&appid=${API_KEY}&units=metric`);
+          const json = await res.json();
+          if (!res.ok) {
+            if (json.cod === '404')  throw new Error('City not found. Check the spelling and try again.');
+            if (json.cod === 401)    throw new Error('Invalid API key. Get yours free at openweathermap.org.');
+            throw new Error(json.message || 'Something went wrong. Please try again.');
+          }
+          setData(json);
+          setStatus('success');
+          setRecent(prev => pushRecent(json.name, prev));
+        } catch (err) {
+          setError(err.message);
+          setStatus('error');
+          setData(null);
+        }
+      }, []);
+
+      const handleSearch = () => { if (query.trim()) fetchWeather(query.trim()); };
+      const handleKey    = (e) => { if (e.key === 'Enter') handleSearch(); };
+
+      const bg = data ? getBg(data.weather[0].id) : { glow: '#4f6ef7' };
+
+      const SUGGESTIONS = ['Tokyo', 'London', 'Bangkok', 'New York', 'Paris'];
+
+      return (
+        <div style={{
+          minHeight: '100vh',
+          background: `radial-gradient(ellipse 80% 50% at 50% 0%, ${bg.glow}14 0%, transparent 60%)`,
+          backgroundColor: '#0d1117',
+          color: '#e6edf3',
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          padding: 'clamp(20px,5vw,60px) 20px clamp(32px,5vw,60px)',
+          transition: 'background-color 1s ease',
+        }}>
+
+          {/* ── Header ── */}
+          <div style={{
+            width:'100%', maxWidth:720,
+            display:'flex', justifyContent:'space-between', alignItems:'center',
+            marginBottom:'clamp(20px,4vw,40px)', flexWrap:'wrap', gap:12,
+          }}>
+            <div>
+              <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:4 }}>
+                <span style={{ fontSize:'1rem' }}>⛅</span>
+                <span style={{ fontSize:'0.68rem', fontWeight:700, letterSpacing:'0.12em', textTransform:'uppercase', color:'#4f6ef7' }}>
+                  Weather Dashboard
+                </span>
+              </div>
+              <p style={{ fontSize:'clamp(1rem,2.8vw,1.45rem)', fontWeight:700, color:'#f0f6fc', letterSpacing:'-0.025em', lineHeight:1.2 }}>
+                Real-time weather, anywhere.
+              </p>
+            </div>
+
+            {/* °C / °F toggle — only when data is loaded */}
+            {status === 'success' && (
+              <button
+                onClick={() => setUnit(u => u === 'C' ? 'F' : 'C')}
+                style={{ background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)', color:'#c9d1d9', borderRadius:10, padding:'8px 18px', cursor:'pointer', fontSize:'0.84rem', fontWeight:600 }}
+                onMouseEnter={e => { e.currentTarget.style.background='rgba(79,110,247,0.18)'; e.currentTarget.style.borderColor='rgba(79,110,247,0.5)'; e.currentTarget.style.color='#818cf8'; }}
+                onMouseLeave={e => { e.currentTarget.style.background='rgba(255,255,255,0.06)'; e.currentTarget.style.borderColor='rgba(255,255,255,0.12)'; e.currentTarget.style.color='#c9d1d9'; }}
+              >
+                Switch to °{unit === 'C' ? 'F' : 'C'}
+              </button>
+            )}
+          </div>
+
+          {/* ── Search bar ── */}
+          <div style={{ width:'100%', maxWidth:720, marginBottom:12 }}>
+            <div style={{
+              display:'flex', alignItems:'center', gap:10,
+              background:'rgba(22,27,34,0.85)',
+              border: `1px solid ${focused ? 'rgba(79,110,247,0.65)' : 'rgba(48,54,61,0.9)'}`,
+              borderRadius:14, padding:'6px 6px 6px 16px',
+              transition:'border-color 200ms',
+              boxShadow: focused ? '0 0 0 3px rgba(79,110,247,0.1)' : 'none',
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6e7681" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink:0 }}>
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+              </svg>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                onKeyDown={handleKey}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                placeholder="Search city… Tokyo, London, Bangkok"
+                style={{
+                  flex:1, background:'transparent', border:'none', outline:'none',
+                  color:'#e6edf3', fontSize:'0.95rem', fontWeight:400,
+                  caretColor:'#4f6ef7', padding:'8px 0', minWidth:0,
+                }}
+              />
+              <button
+                onClick={handleSearch}
+                disabled={!query.trim() || status === 'loading'}
+                style={{
+                  background: query.trim() ? '#4f6ef7' : 'rgba(79,110,247,0.16)',
+                  color: query.trim() ? '#fff' : 'rgba(255,255,255,0.3)',
+                  border: 'none', borderRadius: 10, padding: '10px 24px',
+                  cursor: query.trim() && status !== 'loading' ? 'pointer' : 'default',
+                  fontSize: '0.87rem', fontWeight: 600, flexShrink: 0,
+                  transition: 'background 150ms, color 150ms',
+                  opacity: status === 'loading' ? 0.6 : 1,
+                  letterSpacing: '0.02em',
+                }}
+                onMouseEnter={e => { if (query.trim() && status !== 'loading') e.currentTarget.style.background = '#3651d4'; }}
+                onMouseLeave={e => { if (query.trim()) e.currentTarget.style.background = '#4f6ef7'; }}
+              >
+                {status === 'loading' ? '…' : 'Search'}
+              </button>
+            </div>
+          </div>
+
+          {/* ── Recent searches ── */}
+          {recent.length > 0 && (
+            <div style={{ width:'100%', maxWidth:720, display:'flex', alignItems:'center', flexWrap:'wrap', gap:8, marginBottom:32, paddingLeft:2 }}>
+              <span style={{ fontSize:'0.66rem', fontWeight:700, color:'#6e7681', letterSpacing:'0.12em', textTransform:'uppercase', flexShrink:0 }}>
+                Recent
+              </span>
+              {recent.map(city => (
+                <button
+                  key={city}
+                  onClick={() => { setQuery(city); fetchWeather(city); }}
+                  style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(48,54,61,0.85)', color:'#8b949e', borderRadius:99, padding:'4px 14px', fontSize:'0.81rem', fontWeight:500, cursor:'pointer', transition:'all 150ms' }}
+                  onMouseEnter={e => { e.currentTarget.style.background='rgba(79,110,247,0.12)'; e.currentTarget.style.borderColor='rgba(79,110,247,0.42)'; e.currentTarget.style.color='#818cf8'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background='rgba(255,255,255,0.04)'; e.currentTarget.style.borderColor='rgba(48,54,61,0.85)'; e.currentTarget.style.color='#8b949e'; }}
+                >
+                  {city}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* ── Content ── */}
+          <div style={{ width:'100%', maxWidth:720 }}>
+
+            {/* Idle */}
+            {status === 'idle' && (
+              <div style={{ display:'flex', flexDirection:'column', alignItems:'center', padding:'clamp(40px,8vw,80px) 0', gap:14, textAlign:'center' }}>
+                <div className="idle-globe" style={{ fontSize:'3.5rem' }}>🌍</div>
+                <p style={{ color:'#6e7681', fontSize:'0.93rem', fontWeight:400 }}>
+                  Enter a city name to get current weather
+                </p>
+                <div style={{ display:'flex', flexWrap:'wrap', justifyContent:'center', gap:'4px 6px', marginTop:4 }}>
+                  {SUGGESTIONS.map(city => (
+                    <button
+                      key={city}
+                      onClick={() => { setQuery(city); fetchWeather(city); }}
+                      style={{ background:'none', border:'none', color:'#4f6ef7', cursor:'pointer', fontSize:'0.84rem', fontWeight:500, padding:'4px 6px', textDecoration:'underline', textUnderlineOffset:3, letterSpacing:'0.01em' }}
+                      onMouseEnter={e => e.currentTarget.style.opacity='0.65'}
+                      onMouseLeave={e => e.currentTarget.style.opacity='1'}
+                    >{city}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Loading */}
+            {status === 'loading' && <Spinner />}
+
+            {/* Error */}
+            {status === 'error' && (
+              <ErrorState msg={error} onDismiss={() => { setStatus('idle'); setError(''); }} />
+            )}
+
+            {/* Success */}
+            {status === 'success' && data && (
+              <WeatherCard data={data} unit={unit} />
+            )}
+          </div>
+
+          {/* ── Footer ── */}
+          <p style={{ marginTop:'clamp(32px,6vw,56px)', color:'rgba(255,255,255,0.11)', fontSize:'0.71rem', textAlign:'center', letterSpacing:'0.04em', lineHeight:1.8 }}>
+            Powered by OpenWeatherMap Free API
+            <span style={{ display:'block', color:'rgba(255,255,255,0.08)' }}>
+              Replace <code style={{ fontFamily:'monospace' }}>API_KEY = 'demo'</code> with your key for live data
+            </span>
+          </p>
+
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
